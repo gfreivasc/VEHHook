@@ -2,16 +2,16 @@
 #include <Windows.h>
 #include <map>
 
-typedef void(*PVFUNC_CALL)(PCONTEXT);
-typedef std::map<LPVOID, PVFUNC_CALL>	DWHOOK;
-typedef std::map<LPVOID, BYTE>			DWBYTE;
+#define TRAP_FLAG (1 << 8)
 
-extern DWHOOK dwHooks;
+typedef std::map<DWORD, DWORD>			DWDWORD;
+
+extern DWDWORD lpHooks;
+extern DWDWORD lpProtection;
 
 class VEHHook
 {
 	PVOID pVectoredHandle;
-	DWBYTE dwOriginalInstruction;
 	static LONG CALLBACK VectoredHandler(_In_ PEXCEPTION_POINTERS);
 public:
 	VEHHook();

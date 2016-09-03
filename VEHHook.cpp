@@ -1,6 +1,7 @@
 #include "VEHHook.h"
 
-DWHOOK dwHooks;
+DWDWORD lpHooks;
+DWDWORD lpProtection;
 
 VEHHook::VEHHook()
 {
@@ -25,36 +26,52 @@ VEHHook::~VEHHook()
 
 void VEHHook::AddHook(LPVOID lpEntry, PVOID pHookFunction)
 {
-	dwHooks[lpEntry] = (PVFUNC_CALL)pHookFunction;
-	this->dwOriginalInstruction[lpEntry] = *(PBYTE)lpEntry;
+	lpHooks[(DWORD)lpEntry] = (DWORD)pHookFunction;
 	DWORD dwOld;
-	VirtualProtect(lpEntry, 1, PAGE_EXECUTE_READWRITE, &dwOld);
-	*(PBYTE)lpEntry = 0xCC;
-	VirtualProtect(lpEntry, 1, dwOld, &dwOld);
+	VirtualProtect(lpEntry, 1, PAGE_EXECUTE | PAGE_GUARD, &dwOld);
+	lpProtection[(DWORD)lpEntry] = dwOld;
 }
 
 void VEHHook::RemoveHook(LPVOID lpEntry)
 {
 	DWORD dwOld;
-	VirtualProtect(lpEntry, 1, PAGE_EXECUTE_READWRITE, &dwOld);
-	*(PBYTE)lpEntry = this->dwOriginalInstruction[lpEntry];
-	VirtualProtect(lpEntry, 1, dwOld, &dwOld);
-	dwHooks[lpEntry] = NULL;
+	VirtualProtect(lpEntry, 1, lpProtection[(DWORD)lpEntry], &dwOld);
+	lpHooks[(DWORD)lpEntry] = NULL;
 }
 
 LONG CALLBACK VEHHook::VectoredHandler(_In_ PEXCEPTION_POINTERS pExceptionInfo)
 {
-	if (pExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT)
+	static DWORD lpLastRaised = NULL;
+	if (pExceptionInfo->ExceptionRecord->ExceptionCode == STATUS_GUARD_PAGE_VIOLATION)
 	{
-		LPVOID lpCall;
+		DWORD lpEntry;
 #ifdef _WIN64
-		lpCall = (LPVOID)pExceptionInfo->ContextRecord->Rip;
+		lpEntry = pExceptionInfo->ContextRecord->Rip + 7;
 #else
-		lpCall = (LPVOID)pExceptionInfo->ContextRecord->Eip;
+		lpEntry = pExceptionInfo->ContextRecord->Eip + 3;
 #endif
-		dwHooks[lpCall](pExceptionInfo->ContextRecord);
+		DWDWORD::iterator it = lpHooks.find(lpEntry);
+		if (it != lpHooks.end())
+		{
+			lpLastRaised = lpEntry;
+#ifdef _WIN64
+			pExceptionInfo->ContextRecord->Rip = (DWORD64)(it->second);
+#else
+			pExceptionInfo->ContextRecord->Eip = it->second;
+#endif
+		}
+
+		pExceptionInfo->ContextRecord->EFlags |= TRAP_FLAG;
+	}
+	else if (pExceptionInfo->ExceptionRecord->ExceptionCode == STATUS_SINGLE_STEP)
+	{
+		DWORD dwOld;
+		VirtualProtect((LPVOID)lpLastRaised, 1, PAGE_EXECUTE | PAGE_GUARD, &dwOld);
+	}
+	else
+	{
+		return EXCEPTION_CONTINUE_SEARCH;
 	}
 
-	pExceptionInfo->ContextRecord->EFlags |= 0x100;
 	return EXCEPTION_CONTINUE_EXECUTION;
 }
