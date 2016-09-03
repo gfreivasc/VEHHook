@@ -1,15 +1,15 @@
 #include "VEHHook.h"
 
-DWDWORD lpHooks;
-DWDWORD lpProtection;
+std::vector<VEHHook::HookCtx> VEHHook::m_HookTargets;
+std::mutex VEHHook::m_TargetMutex;
 
-VEHHook::VEHHook()
+VEHHook::VEHHook() : m_Hooked(false)
 {
 	try
 	{
-		this->pVectoredHandle = AddVectoredExceptionHandler(1, &VEHHook::VectoredHandler);
+		m_pVectoredHandle = AddVectoredExceptionHandler(1, &VEHHook::VectoredHandler);
 
-		if (this->pVectoredHandle == NULL)
+		if (m_pVectoredHandle == NULL)
 			throw std::runtime_error("Could not add Vectored Exception Handler");
 	}
 	catch (const std::runtime_error& e)
@@ -21,57 +21,91 @@ VEHHook::VEHHook()
 
 VEHHook::~VEHHook()
 {
-	RemoveVectoredExceptionHandler(this->pVectoredHandle);
+	if (m_Hooked) RemoveAll();
+	RemoveVectoredExceptionHandler(m_pVectoredHandle);
 }
 
-void VEHHook::AddHook(LPVOID lpEntry, PVOID pHookFunction)
+bool VEHHook::AddHook(PBYTE pEntry, PBYTE pHookFunction)
 {
-	lpHooks[(DWORD)lpEntry] = (DWORD)pHookFunction;
+	HookCtx Ctx(pEntry, pHookFunction);
+	
+	std::lock_guard<std::mutex> Lock(m_TargetMutex);
+
 	DWORD dwOld;
-	VirtualProtect(lpEntry, 1, PAGE_EXECUTE | PAGE_GUARD, &dwOld);
-	lpProtection[(DWORD)lpEntry] = dwOld;
+	VirtualProtect(Ctx.m_Src, 1, PAGE_EXECUTE_READWRITE, &dwOld);
+	Ctx.m_StorageByte = *Ctx.m_Src;
+	*Ctx.m_Src = 0xCC;
+	VirtualProtect(Ctx.m_Src, 1, dwOld, &dwOld);
+
+	m_HookTargets.push_back(Ctx);
+	if (!m_Hooked) m_Hooked = true;
+	return true;
 }
 
-void VEHHook::RemoveHook(LPVOID lpEntry)
+void VEHHook::RemoveHook(PBYTE pEntry)
 {
+	std::lock_guard<std::mutex> Lock(m_TargetMutex);
+
 	DWORD dwOld;
-	VirtualProtect(lpEntry, 1, lpProtection[(DWORD)lpEntry], &dwOld);
-	lpHooks[(DWORD)lpEntry] = NULL;
+	for (HookCtx &Ctx : m_HookTargets)
+	{
+		if (Ctx.m_Src != pEntry) continue;
+
+		VirtualProtect(Ctx.m_Src, 1, PAGE_EXECUTE_READWRITE, &dwOld);
+		*Ctx.m_Src = Ctx.m_StorageByte;
+		VirtualProtect(Ctx.m_Src, 1, dwOld, &dwOld);
+
+		m_HookTargets.erase(
+			std::remove(m_HookTargets.begin(), m_HookTargets.end(), Ctx),
+			m_HookTargets.end()
+		);
+
+		if (m_HookTargets.size() == 0)
+			m_Hooked = false;
+	}
+}
+
+void VEHHook::RemoveAll()
+{
+	std::lock_guard<std::mutex> Lock(m_TargetMutex);
+	
+	DWORD dwOld;
+	for (HookCtx &Ctx : m_HookTargets)
+	{
+		VirtualProtect(Ctx.m_Src, 1, PAGE_EXECUTE_READWRITE, &dwOld);
+		*Ctx.m_Src = Ctx.m_StorageByte;
+		VirtualProtect(Ctx.m_Src, 1, dwOld, &dwOld);
+	}
+
+	m_HookTargets.clear();
+	m_Hooked = false;
 }
 
 LONG CALLBACK VEHHook::VectoredHandler(_In_ PEXCEPTION_POINTERS pExceptionInfo)
 {
-	static DWORD lpLastRaised = NULL;
-	if (pExceptionInfo->ExceptionRecord->ExceptionCode == STATUS_GUARD_PAGE_VIOLATION)
-	{
-		DWORD lpEntry;
 #ifdef _WIN64
-		lpEntry = pExceptionInfo->ContextRecord->Rip + 7;
+#define XIP Rip
 #else
-		lpEntry = pExceptionInfo->ContextRecord->Eip + 3;
+#define XIP Eip
 #endif
-		DWDWORD::iterator it = lpHooks.find(lpEntry);
-		if (it != lpHooks.end())
-		{
-			lpLastRaised = lpEntry;
-#ifdef _WIN64
-			pExceptionInfo->ContextRecord->Rip = (DWORD64)(it->second);
-#else
-			pExceptionInfo->ContextRecord->Eip = it->second;
-#endif
-		}
+	std::lock_guard<std::mutex> Lock(m_TargetMutex);
 
-		pExceptionInfo->ContextRecord->EFlags |= TRAP_FLAG;
-	}
-	else if (pExceptionInfo->ExceptionRecord->ExceptionCode == STATUS_SINGLE_STEP)
+	if (pExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP)
 	{
 		DWORD dwOld;
-		VirtualProtect((LPVOID)lpLastRaised, 1, PAGE_EXECUTE | PAGE_GUARD, &dwOld);
-	}
-	else
-	{
-		return EXCEPTION_CONTINUE_SEARCH;
+		for (HookCtx& Ctx : m_HookTargets)
+		{
+			if (pExceptionInfo->ContextRecord->XIP != (DWORD_PTR)Ctx.m_Src)
+				continue;
+
+			VirtualProtect(Ctx.m_Src, 1, PAGE_EXECUTE_READWRITE, &dwOld);
+			*Ctx.m_Src = Ctx.m_StorageByte;
+			VirtualProtect(Ctx.m_Src, 1, dwOld, &dwOld);
+
+			pExceptionInfo->ContextRecord->XIP = (DWORD_PTR)Ctx.m_Dest;
+			return EXCEPTION_CONTINUE_EXECUTION;
+		}
 	}
 
-	return EXCEPTION_CONTINUE_EXECUTION;
+	return EXCEPTION_CONTINUE_SEARCH;
 }

@@ -15,9 +15,9 @@ int main() {
 	VEHHook *Hook = new VEHHook();
 
 	hello(1);
-	Hook->AddHook((LPVOID)hello, (PVOID)goodbye);
+	Hook->AddHook((PBYTE)hello, (PBYTE)goodbye);
 	hello(2);
-	Hook->RemoveHook((LPVOID)hello);
+	Hook->RemoveHook((PBYTE)hello);
 	hello(3);
 
 	delete Hook;
