@@ -1,9 +1,8 @@
 #include "VEHHook.h"
 
-std::vector<VEHHook::HookCtx> VEHHook::m_HookTargets;
-std::mutex VEHHook::m_TargetMutex;
+std::vector<VEHHook::Hook> VEHHook::m_HookTable;
 
-VEHHook::VEHHook() : m_Hooked(false)
+VEHHook::VEHHook()
 {
 	try
 	{
@@ -21,64 +20,49 @@ VEHHook::VEHHook() : m_Hooked(false)
 
 VEHHook::~VEHHook()
 {
-	if (m_Hooked) RemoveAll();
+	if (!m_HookTable.empty()) RemoveAll();
 	RemoveVectoredExceptionHandler(m_pVectoredHandle);
 }
 
 bool VEHHook::AddHook(PBYTE pEntry, PBYTE pHookFunction)
 {
-	HookCtx Ctx(pEntry, pHookFunction);
-	
-	std::lock_guard<std::mutex> Lock(m_TargetMutex);
+	Hook *newHook = new Hook(pEntry, pHookFunction);
 
 	DWORD dwOld;
-	VirtualProtect(Ctx.m_Src, 1, PAGE_EXECUTE_READWRITE, &dwOld);
-	Ctx.m_StorageByte = *Ctx.m_Src;
-	*Ctx.m_Src = 0xCC;
-	VirtualProtect(Ctx.m_Src, 1, dwOld, &dwOld);
+	VirtualProtect(newHook->m_Orig, 1, PAGE_EXECUTE_READWRITE, &dwOld);
+	newHook->m_OpCode = *newHook->m_Orig;
+	printf("Original opcode: 0x%2X\n", newHook->m_OpCode);
+	*newHook->m_Orig = INT3;
+	VirtualProtect(newHook->m_Orig, 1, dwOld, &dwOld);
 
-	m_HookTargets.push_back(Ctx);
-	if (!m_Hooked) m_Hooked = true;
+	m_HookTable.push_back(*newHook);
 	return true;
 }
 
 void VEHHook::RemoveHook(PBYTE pEntry)
 {
-	std::lock_guard<std::mutex> Lock(m_TargetMutex);
-
 	DWORD dwOld;
-	for (HookCtx &Ctx : m_HookTargets)
+	for (Hook &hook : m_HookTable)
 	{
-		if (Ctx.m_Src != pEntry) continue;
+		if (hook.m_Orig != pEntry) continue;
 
-		VirtualProtect(Ctx.m_Src, 1, PAGE_EXECUTE_READWRITE, &dwOld);
-		*Ctx.m_Src = Ctx.m_StorageByte;
-		VirtualProtect(Ctx.m_Src, 1, dwOld, &dwOld);
+		VirtualProtect(hook.m_Orig, 1, PAGE_EXECUTE_READWRITE, &dwOld);
+		*hook.m_Orig = hook.m_OpCode;
+		VirtualProtect(hook.m_Orig, 1, dwOld, &dwOld);
 
-		m_HookTargets.erase(
-			std::remove(m_HookTargets.begin(), m_HookTargets.end(), Ctx),
-			m_HookTargets.end()
+		m_HookTable.erase(
+			std::remove(m_HookTable.begin(), m_HookTable.end(), hook),
+			m_HookTable.end()
 		);
-
-		if (m_HookTargets.size() == 0)
-			m_Hooked = false;
 	}
 }
 
 void VEHHook::RemoveAll()
 {
-	std::lock_guard<std::mutex> Lock(m_TargetMutex);
-	
-	DWORD dwOld;
-	for (HookCtx &Ctx : m_HookTargets)
-	{
-		VirtualProtect(Ctx.m_Src, 1, PAGE_EXECUTE_READWRITE, &dwOld);
-		*Ctx.m_Src = Ctx.m_StorageByte;
-		VirtualProtect(Ctx.m_Src, 1, dwOld, &dwOld);
-	}
+	for (Hook &hook : m_HookTable)
+		RemoveHook(hook.m_Orig);
 
-	m_HookTargets.clear();
-	m_Hooked = false;
+	m_HookTable.clear();
 }
 
 LONG CALLBACK VEHHook::VectoredHandler(_In_ PEXCEPTION_POINTERS pExceptionInfo)
@@ -88,21 +72,17 @@ LONG CALLBACK VEHHook::VectoredHandler(_In_ PEXCEPTION_POINTERS pExceptionInfo)
 #else
 #define XIP Eip
 #endif
-	std::lock_guard<std::mutex> Lock(m_TargetMutex);
 
-	if (pExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP)
+	printf("Exception 0x%X\n", pExceptionInfo->ExceptionRecord->ExceptionCode);
+
+	if (pExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT)
 	{
-		DWORD dwOld;
-		for (HookCtx& Ctx : m_HookTargets)
+		for (Hook& hook : m_HookTable)
 		{
-			if (pExceptionInfo->ContextRecord->XIP != (DWORD_PTR)Ctx.m_Src)
+			if (pExceptionInfo->ContextRecord->XIP != (DWORD)hook.m_Orig)
 				continue;
 
-			VirtualProtect(Ctx.m_Src, 1, PAGE_EXECUTE_READWRITE, &dwOld);
-			*Ctx.m_Src = Ctx.m_StorageByte;
-			VirtualProtect(Ctx.m_Src, 1, dwOld, &dwOld);
-
-			pExceptionInfo->ContextRecord->XIP = (DWORD_PTR)Ctx.m_Dest;
+			pExceptionInfo->ContextRecord->XIP = (DWORD)hook.m_Detour;
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 	}

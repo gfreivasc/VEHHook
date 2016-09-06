@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #define TRAP_FLAG (1 << 8)
+#define INT3	0xCC;
 
 class VEHHook
 {
@@ -14,29 +15,28 @@ public:
 	bool AddHook(PBYTE pEntry, PBYTE pHookFunction);
 	void RemoveHook(PBYTE pEntry);
 	void RemoveAll();
-protected:
-	struct HookCtx
-	{
-		PBYTE m_Src;
-		PBYTE m_Dest;
-		BYTE  m_StorageByte;
 
-		HookCtx(PBYTE src, PBYTE dest)
+	struct Hook
+	{
+		PBYTE m_Orig;
+		PBYTE m_Detour;
+		BYTE  m_OpCode;
+
+		Hook() { m_Orig = m_Detour = 0; }
+		Hook(PBYTE dwOrig, PBYTE dwDetour)
 		{
-			m_Src = src;
-			m_Dest = dest;
+			m_Orig = dwOrig;
+			m_Detour = dwDetour;
 		}
 
-		friend bool operator==(const HookCtx& Ctx1, const HookCtx& Ctx2)
+		friend bool operator==(const Hook& _h1, const Hook& _h2)
 		{
-			return Ctx1.m_Dest == Ctx2.m_Dest && Ctx1.m_Src == Ctx2.m_Src;
+			return _h1.m_Orig == _h2.m_Orig;
 		}
 	};
 private:
 	PVOID m_pVectoredHandle;
 	static LONG CALLBACK VectoredHandler(_In_ PEXCEPTION_POINTERS);
-	static std::vector<HookCtx> m_HookTargets;
-	static std::mutex m_TargetMutex;
-	bool m_Hooked;
+	static std::vector<Hook> m_HookTable;
 };
 
